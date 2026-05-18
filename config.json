@@ -1,0 +1,199 @@
+{
+  "model": "claude-sonnet-4-6",
+  "audit_log_enabled": true,
+  "fetch": {
+    "timeout_seconds": 15,
+    "user_agent": "Mozilla/5.0 (compatible; AIS-tree-updater/1.0)"
+  },
+  "fields": [
+    {
+      "name": "ID",
+      "volatility": "identity",
+      "type": "string",
+      "description": "Stable unique identifier for this fellowship (e.g. aisdb_001). Never changes.",
+      "llm_proposable": false
+    },
+    {
+      "name": "url",
+      "volatility": "identity",
+      "type": "string",
+      "description": "Canonical URL of the fellowship page. Never changes.",
+      "llm_proposable": false
+    },
+    {
+      "name": "name",
+      "volatility": "stable",
+      "type": "string",
+      "description": "Full name of the fellowship or program.",
+      "llm_proposable": true
+    },
+    {
+      "name": "organization",
+      "volatility": "stable",
+      "type": "string",
+      "description": "Name of the organizing institution or group.",
+      "llm_proposable": true
+    },
+    {
+      "name": "track",
+      "volatility": "stable",
+      "type": "string",
+      "description": "The track or focus area (e.g. technical, governance, biosecurity).",
+      "llm_proposable": true
+    },
+    {
+      "name": "program_type",
+      "volatility": "stable",
+      "type": "string",
+      "description": "Type of program (e.g. fellowship, course, workshop, mentorship).",
+      "llm_proposable": true
+    },
+    {
+      "name": "format",
+      "volatility": "stable",
+      "type": "string",
+      "description": "Delivery format: online, in-person, or hybrid.",
+      "llm_proposable": true
+    },
+    {
+      "name": "pacing",
+      "volatility": "stable",
+      "type": "string",
+      "description": "Pacing: self-paced or cohort-based.",
+      "llm_proposable": true
+    },
+    {
+      "name": "geographic_focus",
+      "volatility": "stable",
+      "type": "string",
+      "description": "Geographic scope or location (e.g. Global, US, UK, Bay Area).",
+      "llm_proposable": true
+    },
+    {
+      "name": "for_student",
+      "volatility": "stable",
+      "type": "binary_int",
+      "description": "1 if suitable for students (undergrad/grad), 0 otherwise.",
+      "llm_proposable": true
+    },
+    {
+      "name": "for_early_career",
+      "volatility": "stable",
+      "type": "binary_int",
+      "description": "1 if suitable for early-career professionals (0–5 years), 0 otherwise.",
+      "llm_proposable": true
+    },
+    {
+      "name": "for_mid_career",
+      "volatility": "stable",
+      "type": "binary_int",
+      "description": "1 if suitable for mid-career professionals, 0 otherwise.",
+      "llm_proposable": true
+    },
+    {
+      "name": "for_senior",
+      "volatility": "stable",
+      "type": "binary_int",
+      "description": "1 if suitable for senior professionals or researchers, 0 otherwise.",
+      "llm_proposable": true
+    },
+    {
+      "name": "for_career_switch",
+      "volatility": "stable",
+      "type": "binary_int",
+      "description": "1 if designed to help people transition into AI safety, 0 otherwise.",
+      "llm_proposable": true
+    },
+    {
+      "name": "description",
+      "volatility": "semi-stable",
+      "type": "string",
+      "description": "Short description of the program's goals and content.",
+      "llm_proposable": true
+    },
+    {
+      "name": "duration",
+      "volatility": "semi-stable",
+      "type": "string",
+      "description": "How long the program runs (e.g. '8 weeks', '3 months'). Use [unclear] if not stated.",
+      "llm_proposable": true
+    },
+    {
+      "name": "time_commitment",
+      "volatility": "semi-stable",
+      "type": "string",
+      "description": "Expected hours per week (e.g. '5–10 hrs/week'). Use [unclear] if not stated.",
+      "llm_proposable": true
+    },
+    {
+      "name": "cost",
+      "volatility": "semi-stable",
+      "type": "string",
+      "description": "Cost to participate (e.g. 'Free', '$500', 'Varies'). Use [unclear] if not stated.",
+      "llm_proposable": true
+    },
+    {
+      "name": "recompensation",
+      "volatility": "semi-stable",
+      "type": "string",
+      "description": "Any stipend, grant, or compensation offered (e.g. '$5000 stipend', 'None'). Use [unclear] if not stated.",
+      "llm_proposable": true
+    },
+    {
+      "name": "prerequisites",
+      "volatility": "semi-stable",
+      "type": "string",
+      "description": "Required background or skills (e.g. 'Python, ML basics'). Use [unclear] if not stated.",
+      "llm_proposable": true
+    },
+    {
+      "name": "tags",
+      "volatility": "semi-stable",
+      "type": "comma_separated",
+      "description": "Comma-separated topic tags (e.g. 'alignment, interpretability, policy').",
+      "llm_proposable": true
+    },
+    {
+      "name": "application_status",
+      "volatility": "volatile",
+      "type": "string",
+      "description": "Current application status: 'open', 'closed', 'rolling', or '[unclear]'.",
+      "llm_proposable": true
+    },
+    {
+      "name": "next_deadline",
+      "volatility": "volatile",
+      "type": "date_or_unclear",
+      "description": "Next application deadline as YYYY-MM-DD, or [unclear] if not stated.",
+      "llm_proposable": true
+    },
+    {
+      "name": "next_cohort_start",
+      "volatility": "volatile",
+      "type": "date_or_unclear",
+      "description": "Start date of the next cohort as YYYY-MM-DD, or [unclear] if not stated.",
+      "llm_proposable": true
+    },
+    {
+      "name": "last_verified",
+      "volatility": "auto",
+      "type": "date",
+      "description": "Date this row was last processed by the updater (YYYY-MM-DD). Set by code, not LLM.",
+      "llm_proposable": false
+    },
+    {
+      "name": "notes",
+      "volatility": "manual",
+      "type": "string",
+      "description": "Free-text notes for human reviewers only. Never modified by the updater.",
+      "llm_proposable": false
+    },
+    {
+      "name": "notes_for_claude_during_update",
+      "volatility": "manual",
+      "type": "string",
+      "description": "Hints passed verbatim to the LLM when proposing updates for this row. Use for known extraction quirks, URL instability, or anything the LLM should know about this specific fellowship. Never modified by the updater.",
+      "llm_proposable": false
+    }
+  ]
+}

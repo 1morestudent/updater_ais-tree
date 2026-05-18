@@ -91,6 +91,10 @@ The main sheet has 26 columns. Each fellowship is one row, identified by a stabl
 
 **Never modified by the updater:** `notes` — user-only field.
 
+**Never modified by the updater, read by the LLM:** `notes_for_claude_during_update` — per-row hints passed verbatim into the LLM prompt alongside the page content. Use this for known extraction quirks (e.g. JS-rendered dates), URL instability warnings, or anything the LLM should know about a specific fellowship that isn't derivable from the page. Currently populated for:
+- `aisdb_001–003` (BlueDot): warns that deadlines are in the `__NEXT_DATA__` Next.js JSON blob, not in trafilatura-extracted text
+- `aisdb_012` (Anthropic Fellows): warns that the URL is year-specific and a 404 means the cycle ended, not that applications are closed
+
 Field-type notes for the LLM contract:
 - `for_*` columns are binary integers `0` or `1`
 - `next_deadline` and `next_cohort_start` are dates or `[unclear]`
@@ -201,8 +205,38 @@ The LLM should err toward `potentially_relevant` when uncertain — `not_relevan
 - Webhook notifications
 - Sheet history / undo
 
+## Known extraction problems
+
+### ARENA (aisdb_008)
+ARENA moved from `bluedot.org/arena` (404) to `bluedot.org/courses/arena`. URL corrected in sheet. Also has its own standalone site at `arena.education` — either URL works, the BlueDot one is preferred for consistency with the other BlueDot entries. Note: ARENA also has JS-rendered content like the other BlueDot courses (same Next.js stack), so the same `__NEXT_DATA__` extraction caveat applies for deadlines.
+
+### OpenAI Residency (aisdb_018)
+Produced a fetch_error in the first live test run. The URL (`openai.com/residency/`) returns 200 and trafilatura extracts content correctly in isolation — likely a transient network or rate-limit issue. If fetch errors persist, the page may be behind a bot-detection layer and would need a Playwright fallback (out of scope for v1).
+
+### BlueDot (bluedot.org)
+
+Deadline and cohort start dates are visible on the page but are **not extracted by trafilatura**. The dates are embedded in a Next.js JSON payload (`__NEXT_DATA__`) and rendered client-side — trafilatura only sees the static HTML, which contains the label "Schedule" but not the actual dates.
+
+The data is available in the raw HTML: the `soonestDeadline` field appears in a `<script id="__NEXT_DATA__">` JSON blob, and "Apply by DD Mon" appears in button text. A workaround is to parse `__NEXT_DATA__` directly from the raw response rather than relying on trafilatura's extraction. This is not implemented in v1 — for now, BlueDot deadlines must be checked and updated manually.
+
+Affects: `aisdb_001`, `aisdb_002`, `aisdb_003` (all bluedot.org/courses/* URLs).
+
 ## Open questions to resolve in implementation
 
 - Whether to add a "needs follow-up" state distinct from rejected (cases where the LLM correctly detected a change but the proposed values are wrong).
 - How aggressively to normalize date formats — "Dec 15, 2025" vs "2025-12-15" should be considered equal. Implement explicit normalizer in `diff.py`.
 - Whether to log every LLM response (full request + response) to a `_audit` tab for debugging early on. Default: yes for the first few weeks, behind a config flag.
+
+## Known issues / backlog
+
+### 1. Current date missing from LLM prompt
+The LLM has no awareness of today's date, so it cannot correctly infer whether an application deadline is in the past or future. E.g. Pivotal had a deadline of 3 May — the LLM proposed `application_status: open` even though it had already passed. Fix: inject `today: YYYY-MM-DD` into the user prompt so the LLM can reason about open/closed correctly.
+
+### 2. `recompensation` field should be numeric (USD)
+The field currently accepts free text but should store a single number in USD (e.g. `8400` for $8,400/month, `0` for none). Complex recompensation structures (lotteries, variable stipends, housing credits) should be summarised as the minimum guaranteed value in `recompensation` and the full detail noted in `notes`. Conversion from other currencies should happen at write time. A broader task: define expected types for all fields in `config.json` and add a validation pass in `diff.py` or `pipeline.py` that warns when a proposed value doesn't match the expected type.
+
+### 3. Frontier AI Governance has two separate programs
+`aisdb_003` (BlueDot Frontier AI Governance) covers both an intensive 5-day track and a part-time 5-week track. These should probably be two separate sheet entries. Needs a manual data decision before implementation.
+
+### 4. Two-phase run: diff first, then confirm before LLM
+Currently "Run updater" fetches all pages, runs diffs, and calls the LLM in one pass. Better UX: split into two steps. Phase 1 (cheap): fetch all pages, compute hashes, identify which entries changed — show a summary table (N changed, N unchanged, N errors) and an estimated token cost (assume ~3¢ per changed entry as a rough guide). Phase 2 (expensive): user confirms, then LLM calls are made only for changed entries. This avoids surprise API costs and lets the user abort if something looks wrong.
