@@ -1,0 +1,11 @@
+# Secrets — never commit
+.streamlit/secrets.toml
+aisafety-496413-c515c7911d96.json
+
+# Python
+__pycache__/
+*.py[cod]
+.env
+
+# OS
+.DS_Store
