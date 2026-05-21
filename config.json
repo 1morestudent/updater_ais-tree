@@ -38,35 +38,40 @@
       "name": "track",
       "volatility": "stable",
       "type": "string",
-      "description": "The track or focus area (e.g. technical, governance, biosecurity).",
+      "allowed_values": ["technical", "governance", "general", "neutral"],
+      "description": "Focus area of the program. Use one of the allowed values.",
       "llm_proposable": true
     },
     {
       "name": "program_type",
       "volatility": "stable",
       "type": "string",
-      "description": "Type of program (e.g. fellowship, course, workshop, mentorship).",
+      "allowed_values": ["fellowship", "course", "workshop", "mentorship", "bootcamp", "advising"],
+      "description": "Type of program. Use one of the allowed values.",
       "llm_proposable": true
     },
     {
       "name": "format",
       "volatility": "stable",
       "type": "string",
-      "description": "Delivery format: online, in-person, or hybrid.",
+      "allowed_values": ["online", "in-person", "hybrid"],
+      "description": "Delivery format. Use one of the allowed values.",
       "llm_proposable": true
     },
     {
       "name": "pacing",
       "volatility": "stable",
       "type": "string",
-      "description": "Pacing: self-paced or cohort-based.",
+      "allowed_values": ["self-paced", "cohort-based"],
+      "description": "Pacing structure. Use one of the allowed values. Note: rolling admissions is still 'cohort-based' if the program runs in cohorts.",
       "llm_proposable": true
     },
     {
       "name": "geographic_focus",
       "volatility": "stable",
       "type": "string",
-      "description": "Geographic scope or location (e.g. Global, US, UK, Bay Area).",
+      "allowed_values": ["global", "us-centric", "uk/eu-centric"],
+      "description": "Geographic scope. Use one of the allowed values.",
       "llm_proposable": true
     },
     {
@@ -114,15 +119,15 @@
     {
       "name": "duration",
       "volatility": "semi-stable",
-      "type": "string",
-      "description": "How long the program runs (e.g. '8 weeks', '3 months'). Use [unclear] if not stated.",
+      "type": "weeks_int",
+      "description": "Duration in whole weeks (e.g. 10). Use '<1' for programs shorter than one week. Use [unclear] if not stated. Do not include the word 'weeks'.",
       "llm_proposable": true
     },
     {
       "name": "time_commitment",
       "volatility": "semi-stable",
-      "type": "string",
-      "description": "Expected hours per week (e.g. '5–10 hrs/week'). Use [unclear] if not stated.",
+      "type": "hrs_per_week_int",
+      "description": "Expected hours per week as a whole integer (e.g. 10, or 40 for full-time). Use [unclear] if not stated. Do not include units.",
       "llm_proposable": true
     },
     {
@@ -135,8 +140,8 @@
     {
       "name": "recompensation",
       "volatility": "semi-stable",
-      "type": "string",
-      "description": "Any stipend, grant, or compensation offered (e.g. '$5000 stipend', 'None'). Use [unclear] if not stated.",
+      "type": "usd_int",
+      "description": "Minimum guaranteed compensation in whole USD (e.g. 8400 for $8,400/month, 0 for none). No symbols or commas. Use [unclear] if not stated.",
       "llm_proposable": true
     },
     {
@@ -157,7 +162,8 @@
       "name": "application_status",
       "volatility": "volatile",
       "type": "string",
-      "description": "Current application status: 'open', 'closed', 'rolling', or '[unclear]'.",
+      "allowed_values": ["open", "closed", "rolling"],
+      "description": "Current application status. Use one of the allowed values, or [unclear] if not determinable.",
       "llm_proposable": true
     },
     {

@@ -4,7 +4,7 @@ import anthropic
 import streamlit as st
 
 from updater.llm import build_schema_description, load_system_prompt
-from updater.pipeline import process_row
+from updater.pipeline import fetch_row, process_changed_row, _make_no_llm_result
 from updater.sheets import (
     accept_fellowship,
     ensure_state_tab,
@@ -14,6 +14,7 @@ from updater.sheets import (
     set_last_verified_by_id,
     update_state_result,
     upsert_state_row,
+    set_trigger_flag,
 )
 
 st.set_page_config(page_title="AIS-tree Updater", layout="wide")
@@ -58,7 +59,6 @@ if not st.session_state.authenticated:
 @st.cache_resource
 def get_spreadsheet():
     sa = dict(st.secrets["gcp_service_account"])
-    # gspread needs private_key newlines unescaped
     if "\\n" in sa.get("private_key", ""):
         sa["private_key"] = sa["private_key"].replace("\\n", "\n")
     return open_sheet(sa, st.secrets["SHEET_ID"])
@@ -73,10 +73,17 @@ def get_llm_client():
 # Session state init
 # ---------------------------------------------------------------------------
 
-if "results" not in st.session_state:
-    st.session_state.results = []
-if "review" not in st.session_state:
-    st.session_state.review = {}  # id -> {"action": "accepted"|"rejected"}
+_DEFAULTS = {
+    "run_phase": None,       # None | "phase1_done" | "complete"
+    "phase1_results": [],
+    "phase1_rows": {},
+    "phase1_state": {},
+    "results": [],
+    "review": {},
+}
+for _k, _v in _DEFAULTS.items():
+    if _k not in st.session_state:
+        st.session_state[_k] = _v
 
 
 # ---------------------------------------------------------------------------
@@ -115,7 +122,8 @@ def _render_card(result: dict) -> None:
     with st.container(border=True):
         col_name, col_badge = st.columns([4, 1])
         with col_name:
-            st.markdown(f"**[{result['name']}]({result['url']})**  `{fid}`")
+            triggered_label = "  _(forced re-check)_" if result.get("triggered") else ""
+            st.markdown(f"**[{result['name']}]({result['url']})**  `{fid}`{triggered_label}")
         with col_badge:
             st.markdown(BADGE.get(result["classification"], ""))
 
@@ -140,7 +148,9 @@ def _render_card(result: dict) -> None:
         editing = st.session_state.get(f"editing_{fid}", False)
 
         if not editing:
-            # Diff table
+            for tw in result.get("type_warnings", []):
+                st.warning(f"Type warning — **{tw['field']}**: {tw['warning']}")
+
             table_data = [
                 {
                     "Field": c["field"],
@@ -167,7 +177,6 @@ def _render_card(result: dict) -> None:
                     st.rerun()
 
         else:
-            # Edit mode — use a form so inputs don't trigger per-keystroke reruns
             with st.form(key=f"form_{fid}"):
                 edits = {}
                 for c in result["changes"]:
@@ -201,58 +210,144 @@ def _render_card(result: dict) -> None:
 
 st.title("AIS-tree Updater")
 
-if st.button("Run updater", type="primary"):
-    spreadsheet = get_spreadsheet()
-    rows = read_main_rows(spreadsheet)
-    state_ws = ensure_state_tab(spreadsheet)
-    state = read_state(state_ws)
-    system_prompt = load_system_prompt()
-    schema_desc = build_schema_description(config["fields"])
-    llm_client = get_llm_client()
+# ── Phase 0: idle — show "Run updater" button ──────────────────────────────
+if st.session_state.run_phase is None:
+    if st.button("Run updater", type="primary"):
+        spreadsheet = get_spreadsheet()
+        rows = read_main_rows(spreadsheet)
+        state_ws = ensure_state_tab(spreadsheet)
+        state = read_state(state_ws)
 
-    results = []
-    with st.status("Checking fellowships…", expanded=True) as run_status:
-        for i, row in enumerate(rows):
-            name = row.get("name", row["ID"])
-            st.write(f"Checking {i + 1}/{len(rows)}: {name}…")
-            result = process_row(row, state, config, llm_client, system_prompt, schema_desc)
-            results.append(result)
+        phase1_results = []
+        with st.status("Fetching fellowship pages…", expanded=True) as run_status:
+            for i, row in enumerate(rows):
+                name = row.get("name", row["ID"])
+                st.write(f"Fetching {i + 1}/{len(rows)}: {name}…")
+                fr = fetch_row(row, state, config)
+                phase1_results.append(fr)
 
-            # Update state tab
-            new_state_row = {
-                "id": row["ID"],
-                "url": str(row.get("url", "")),
-                "last_hash": result.get("new_hash") or state.get(row["ID"], {}).get("last_hash", ""),
-                "last_checked_at": result["checked_at"],
-                "last_classification": result.get("classification") or result["status"],
-                "last_result": "pending" if result["status"] == "pending" else "",
-            }
-            upsert_state_row(state_ws, state, new_state_row)
+                # Commit unchanged rows immediately — no LLM needed
+                if fr["status"] == "unchanged":
+                    new_state_row = {
+                        "id": row["ID"],
+                        "url": str(row.get("url", "")),
+                        "last_hash": fr["new_hash"],
+                        "last_checked_at": fr["checked_at"],
+                        "last_classification": state.get(row["ID"], {}).get("last_classification", ""),
+                        "last_result": "",
+                    }
+                    upsert_state_row(state_ws, state, new_state_row)
+                    set_last_verified_by_id(spreadsheet, row["ID"])
 
-            # Update last_verified for all rows that were successfully fetched
-            if result["status"] not in ("no_url", "fetch_error"):
-                set_last_verified_by_id(spreadsheet, row["ID"])
+            changed_count = sum(1 for r in phase1_results if r["status"] == "changed")
+            run_status.update(
+                label=f"Fetch complete — {changed_count} changed, {len(phase1_results) - changed_count} other",
+                state="complete",
+            )
 
-        run_status.update(label=f"Done — {len(rows)} fellowships checked", state="complete")
+        st.session_state.phase1_results = phase1_results
+        st.session_state.phase1_rows = {row["ID"]: row for row in rows}
+        st.session_state.phase1_state = state
+        st.session_state.run_phase = "phase1_done"
+        st.rerun()
 
-    st.session_state.results = results
-    st.session_state.review = {}
-    st.rerun()
+# ── Phase 1 done: show summary + confirm button ────────────────────────────
+elif st.session_state.run_phase == "phase1_done":
+    phase1 = st.session_state.phase1_results
+    changed = [r for r in phase1 if r["status"] == "changed"]
+    unchanged = [r for r in phase1 if r["status"] == "unchanged"]
+    errors = [r for r in phase1 if r["status"] == "fetch_error"]
+    no_url = [r for r in phase1 if r["status"] == "no_url"]
 
-# ---------------------------------------------------------------------------
-# Results
-# ---------------------------------------------------------------------------
+    st.subheader("Fetch complete")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Changed", len(changed))
+    c2.metric("Unchanged", len(unchanged))
+    c3.metric("Errors", len(errors))
+    c4.metric("No URL", len(no_url))
 
-if st.session_state.results:
+    if errors:
+        with st.expander(f"Fetch errors ({len(errors)})"):
+            for r in errors:
+                st.markdown(f"- **{r['name']}**: {r['error']}")
+
+    if not changed:
+        st.info("No changes detected — nothing to analyse.")
+        if st.button("Reset"):
+            st.session_state.run_phase = None
+            st.rerun()
+    else:
+        est_cost = len(changed) * 0.03
+        st.info(
+            f"**{len(changed)} changed** entr{'y' if len(changed) == 1 else 'ies'} ready for LLM analysis. "
+            f"Estimated cost: ~${est_cost:.2f}."
+        )
+        col_confirm, col_cancel = st.columns(2)
+        with col_confirm:
+            if st.button(f"Analyse {len(changed)} {'entry' if len(changed) == 1 else 'entries'}", type="primary"):
+                spreadsheet = get_spreadsheet()
+                state_ws = ensure_state_tab(spreadsheet)
+                system_prompt = load_system_prompt()
+                schema_desc = build_schema_description(config["fields"])
+                llm_client = get_llm_client()
+                state = st.session_state.phase1_state
+                phase1_rows = st.session_state.phase1_rows
+
+                results = []
+                with st.status("Analysing changed entries…", expanded=True) as run_status:
+                    for i, fr in enumerate(changed):
+                        row = phase1_rows[fr["id"]]
+                        name = row.get("name", fr["id"])
+                        st.write(f"Analysing {i + 1}/{len(changed)}: {name}…")
+                        result = process_changed_row(row, fr, config, llm_client, system_prompt, schema_desc)
+                        results.append(result)
+
+                        new_state_row = {
+                            "id": fr["id"],
+                            "url": fr["url"],
+                            "last_hash": fr["new_hash"],
+                            "last_checked_at": fr["checked_at"],
+                            "last_classification": result.get("classification") or result["status"],
+                            "last_result": "pending" if result["status"] == "pending" else "",
+                            "trigger_check_next_update": "",  # clear trigger after LLM run
+                        }
+                        upsert_state_row(state_ws, state, new_state_row)
+                        set_last_verified_by_id(spreadsheet, fr["id"])
+
+                    run_status.update(
+                        label=f"Done — {len(changed)} entries analysed",
+                        state="complete",
+                    )
+
+                # Include no_url and fetch_error rows in the results for display
+                for fr in no_url + errors:
+                    results.append(_make_no_llm_result(fr))
+
+                st.session_state.results = results
+                st.session_state.review = {}
+                st.session_state.run_phase = "complete"
+                st.rerun()
+
+        with col_cancel:
+            if st.button("Cancel"):
+                st.session_state.run_phase = None
+                st.rerun()
+
+# ── Phase 2 complete: show results ────────────────────────────────────────
+elif st.session_state.run_phase == "complete":
+    if st.button("Run updater again"):
+        for k in ("run_phase", "phase1_results", "phase1_rows", "phase1_state", "results", "review"):
+            st.session_state[k] = _DEFAULTS[k]
+        st.rerun()
+
     results = st.session_state.results
     show_reviewed = st.checkbox("Show already reviewed", value=False)
 
     pending = [r for r in results if r["status"] == "pending"]
     errors = [r for r in results if r["status"] in ("fetch_error", "llm_error")]
-    unchanged = [r for r in results if r["status"] == "unchanged"]
+    unchanged = [r for r in st.session_state.phase1_results if r["status"] == "unchanged"]
     no_url = [r for r in results if r["status"] == "no_url"]
 
-    # Errors first
     if errors:
         st.subheader(f"Errors ({len(errors)})")
         for r in errors:
@@ -263,7 +358,6 @@ if st.session_state.results:
                     with st.expander("Raw LLM output"):
                         st.text(r["llm_raw"])
 
-    # Pending cards grouped by classification
     for cls in STATUS_ORDER:
         group = [r for r in pending if r["classification"] == cls]
         if not group:
@@ -275,7 +369,6 @@ if st.session_state.results:
                 continue
             _render_card(r)
 
-    # Summary rows
     with st.expander(f"Unchanged ({len(unchanged)})"):
         for r in unchanged:
             st.markdown(f"- {r['name']}")

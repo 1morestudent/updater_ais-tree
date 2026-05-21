@@ -1,5 +1,6 @@
 import json
 import re
+from datetime import date
 from pathlib import Path
 
 import anthropic
@@ -13,7 +14,10 @@ def build_schema_description(fields: list[dict]) -> str:
     lines = []
     for f in fields:
         if f["llm_proposable"]:
-            lines.append(f"- {f['name']} ({f['type']}, {f['volatility']}): {f['description']}")
+            line = f"- {f['name']} ({f['type']}, {f['volatility']}): {f['description']}"
+            if f.get("allowed_values"):
+                line += f" Allowed: {f['allowed_values']}."
+            lines.append(line)
     return "\n".join(lines)
 
 
@@ -33,6 +37,7 @@ def call_llm(
     row_for_llm = {k: v for k, v in row.items() if k not in excluded}
 
     user_prompt = (
+        f"Today's date: {date.today().isoformat()}\n\n"
         f"Current fellowship data:\n{json.dumps(row_for_llm, indent=2, default=str)}\n\n"
         f"Extracted page content:\n{extracted_text[:8000]}\n\n"
         f"Proposable fields:\n{schema_description}"

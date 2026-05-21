@@ -24,7 +24,6 @@ conda install -c conda-forge <package>
 pip install <package>
 ```
 
-
 ```bash
 conda create -n ais-tree python=3.11
 conda activate ais-tree
@@ -63,21 +62,24 @@ ais-tree-updater/
 │   ├── fetch.py            # HTTP fetch + trafilatura extraction + hashing
 │   ├── sheets.py           # gspread wrapper, read main + state tab, writes
 │   ├── llm.py              # Anthropic API call + response parsing
-│   ├── diff.py             # field-level normalization + comparison
-│   └── pipeline.py         # orchestration of fetch → diff → llm → propose
+│   ├── diff.py             # field-level normalization, comparison, type validation
+│   └── pipeline.py         # fetch_row (phase 1) + process_changed_row (phase 2)
 ├── prompts/
 │   └── classify.md         # system prompt for the classification call
+├── scripts/
+│   ├── split_aisdb003.py   # one-time: split Frontier AI Governance into two rows
+│   └── migrate_numeric_fields.py  # one-time: converted duration/time_commitment to numeric
 ├── config.json             # schema, field metadata, fetch settings, model name
 ├── requirements.txt
 ├── .streamlit/
 │   └── secrets.toml        # LOCAL ONLY — gitignored
-├── .gitignore              # MUST exclude secrets.toml and service_account.json
+├── .gitignore              # excludes secrets.toml and service_account.json
 └── README.md
 ```
 
 ## Data schema
 
-The main sheet has 26 columns. Each fellowship is one row, identified by a stable `ID` like `aisdb_001`. Columns grouped by volatility:
+The main sheet has 27 columns. Each fellowship is one row, identified by a stable `ID` like `aisdb_001`. Columns grouped by volatility:
 
 **Identity (never changes after creation):** `ID`, `url`
 
@@ -87,23 +89,40 @@ The main sheet has 26 columns. Each fellowship is one row, identified by a stabl
 
 **Volatile (changes per cohort/cycle — the main reason this tool exists):** `application_status`, `next_deadline`, `next_cohort_start`
 
-**Auto-managed by the updater:** `last_verified` — set to today's date whenever a row is processed (regardless of whether anything else changed).
+**Auto-managed by the updater:** `last_verified` — set to today's date whenever a row is processed.
 
 **Never modified by the updater:** `notes` — user-only field.
 
-**Never modified by the updater, read by the LLM:** `notes_for_claude_during_update` — per-row hints passed verbatim into the LLM prompt alongside the page content. Use this for known extraction quirks (e.g. JS-rendered dates), URL instability warnings, or anything the LLM should know about a specific fellowship that isn't derivable from the page. Currently populated for:
+**Never modified by the updater, read by the LLM:** `notes_for_claude_during_update` — per-row hints passed verbatim into the LLM prompt alongside the page content. Use this for known extraction quirks, URL instability warnings, or anything the LLM should know about a specific fellowship. Currently populated for:
 - `aisdb_001–003` (BlueDot): warns that deadlines are in the `__NEXT_DATA__` Next.js JSON blob, not in trafilatura-extracted text
 - `aisdb_012` (Anthropic Fellows): warns that the URL is year-specific and a 404 means the cycle ended, not that applications are closed
 
-Field-type notes for the LLM contract:
-- `for_*` columns are binary integers `0` or `1`
-- `next_deadline` and `next_cohort_start` are dates or `[unclear]`
-- `tags` is a comma-separated list
-- Any field may currently hold the literal string `[unclear]` meaning "not yet verified" — filling these in counts as a meaningful (potentially relevant) change if the page provides the info
+### Field types (enforced in `config.json` and validated in `diff.py`)
+
+| Type | Fields | Notes |
+|---|---|---|
+| `string` | name, organization, description, cost, prerequisites | free text |
+| `binary_int` | for_student, for_early_career, for_mid_career, for_senior, for_career_switch | 0 or 1 only |
+| `date_or_unclear` | next_deadline, next_cohort_start | YYYY-MM-DD or `[unclear]` |
+| `comma_separated` | tags | sorted, lowercase |
+| `usd_int` | recompensation | integer USD, no symbols (e.g. `8400`); `0` = none; `[unclear]` = unknown |
+| `weeks_int` | duration | integer weeks (e.g. `10`); `<1` for sub-week programs; `[unclear]` if unknown |
+| `hrs_per_week_int` | time_commitment | integer hours/week (e.g. `10`); `40` = full-time; `[unclear]` if unknown |
+| `string` + `allowed_values` | track, program_type, format, pacing, geographic_focus, application_status | enum-validated; see `config.json` for the allowed lists |
+
+**Enum allowed values:**
+- `track`: technical, governance, general, neutral
+- `program_type`: fellowship, course, workshop, mentorship, bootcamp, advising
+- `format`: online, in-person, hybrid
+- `pacing`: self-paced, cohort-based (note: rolling admissions is still "cohort-based")
+- `geographic_focus`: global, us-centric, uk/eu-centric
+- `application_status`: open, closed, rolling (plus `[unclear]`)
+
+Any field may hold `[unclear]` — filling it in counts as a meaningful change.
 
 ## State tab (`_updater_state`)
 
-Auto-created on first run if missing. Columns:
+Auto-created on first run if missing. `ensure_state_tab()` also backfills any columns added after the initial creation (so adding a column to `STATE_COLUMNS` is safe). Columns:
 
 - `id` — matches `ID` in main sheet
 - `url` — denormalized for sanity-checking
@@ -111,79 +130,93 @@ Auto-created on first run if missing. Columns:
 - `last_checked_at` — ISO timestamp
 - `last_classification` — `highly_relevant` / `potentially_relevant` / `not_relevant` / `unchanged` / `fetch_error`
 - `last_result` — `accepted` / `rejected` / `pending` / null
+- `trigger_check_next_update` — if `"true"`, the next run forces this row through the LLM even if the hash hasn't changed, then clears the flag. Used to re-verify rows whose current values are known approximations. Set manually or by migration scripts.
+
+**19 rows currently have `trigger_check_next_update = true`** (set during the numeric field migration — ranges were converted to max values and need LLM verification). They will auto-clear on next updater run.
 
 ## Pipeline
 
-For each row in the main sheet:
+The pipeline is split into two phases, both visible in the UI before any LLM costs are incurred.
 
-1. **Fetch** the URL. Handle HTTP errors gracefully — mark `fetch_error` in state, surface in UI, skip LLM call.
-2. **Extract** main content with trafilatura.
-3. **Hash** the extracted text (sha256).
-4. **Compare** against `last_hash` in state. If equal → mark `unchanged`, update `last_checked_at`, set `last_verified` in main sheet to today, done.
-5. If changed → **call the LLM** with: the old row as JSON, the new extracted text, and the field schema with descriptions. LLM returns a structured JSON response (see LLM contract below).
-6. **Code-level diff:** for each field in the LLM's `proposed_fields`, compare against the current sheet value using normalized comparison (strip whitespace, normalize date formats, case-insensitive for categorical fields). Only fields where normalized values differ count as "proposed changes."
-7. **Build a review item:** classification, list of proposed changes (each with old value, proposed value, source snippet from LLM), and the URL.
-8. **Display as a card in the UI.** Do not write anything to the main sheet yet. Update state with new hash and `last_classification`, set `last_result = pending`.
-9. **On Accept:** write proposed values to the main sheet, set `last_verified` to today, set `last_result = accepted` in state.
-10. **On Reject:** make no changes to the main sheet, set `last_result = rejected` in state. The hash is already updated, so the page won't re-flag until it changes again.
-11. **On Edit:** user modifies proposed values in the card before accepting; treated as Accept with the edited values.
+**Phase 1 — fetch (cheap):** For each row, fetch the URL, extract text with trafilatura, hash it. Compare against `last_hash` in state. Also check `trigger_check_next_update`.
+- If hash matches AND no trigger → `unchanged`. State updated, `last_verified` set. No LLM call.
+- If hash changed OR trigger is set → `changed`. Passes to phase 2.
+- On fetch/network error → `fetch_error`. State updated.
+
+**Phase 2 — LLM (confirmed by user):** After phase 1, the UI shows a summary (N changed, N unchanged, N errors) and an estimated cost (~3¢/entry). User must click "Analyse N entries" to proceed.
+- LLM receives: today's date, current row JSON, extracted page text, schema with allowed values listed per field.
+- LLM returns structured JSON: `classification`, `reasoning`, `proposed_fields`, `snippets`.
+- Code-level diff compares proposed values against current values using type-aware normalization.
+- Type validation runs on all proposed values — warnings surfaced in the review card.
+- State updated with new hash, classification, `last_result = pending`. Trigger flag cleared.
+
+**Review (per card):** Accept / Reject / Edit-then-accept. Accept writes proposed values to the main sheet. Triggered rows show "_(forced re-check)_" label.
 
 ## LLM contract
 
-- **Model:** `claude-sonnet-4-6` (verify current latest when starting)
-- **System prompt** lives in `prompts/classify.md` and is loaded at startup (not inlined in code), so it can be iterated on without redeploying.
-- **User prompt** is constructed per call and includes the current row JSON, the new page text, and a compact schema description.
-- **Response must be strict JSON** with this shape:
+- **Model:** `claude-sonnet-4-6` (verify current latest when starting; pinned in `config.json`)
+- **System prompt** lives in `prompts/classify.md` — edit there without redeploying.
+- **User prompt** includes: `Today's date: YYYY-MM-DD`, current row JSON, page text (first 8000 chars), schema description (field name, type, volatility, description, allowed values if any), and any `notes_for_claude_during_update` for this row.
+- **Response must be strict JSON:**
 
 ```json
 {
   "classification": "highly_relevant | potentially_relevant | not_relevant",
-  "reasoning": "one-sentence justification",
-  "proposed_fields": {
-    "field_name": "new value"
-  },
-  "snippets": {
-    "field_name": "the exact text from the page that supports this value"
-  }
+  "reasoning": "One sentence explaining the classification.",
+  "proposed_fields": { "field_name": "new value" },
+  "snippets": { "field_name": "exact supporting text from the page" }
 }
 ```
 
-- On JSON parse failure: mark the row as `needs_manual_review`, store the raw LLM output, surface in UI with the raw text — do not crash or silently drop.
-- Within a single run, sequential calls reuse the same system prompt and schema; rely on Anthropic's 5-minute prompt cache TTL by setting `cache_control` on the system block. This is within-run caching only — zero benefit across weekly runs.
+- On JSON parse failure: mark `llm_error`, store raw output, surface in UI — do not crash.
+- Prompt cache (`cache_control: ephemeral` on system block) gives within-run savings across multiple rows. Zero benefit across separate runs.
+
+## Type validation system
+
+`diff.py` contains:
+- `normalize(value, field_type)` — canonical form for comparison (strips units, lowercases, parses dates, etc.)
+- `validate_value(value, field_type, allowed_values=None)` — returns a warning string or None
+- `validate_proposed(proposed_fields, field_schema)` — returns list of `{field, value, warning}` for all type violations in an LLM response
+
+Type warnings are displayed in review cards above the diff table. The LLM prompt includes allowed values explicitly so violations should be rare.
 
 ## Classification taxonomy
 
 - **`highly_relevant`** — change to a volatile field (deadline, application status, cohort start) OR a field currently `[unclear]` being filled in OR a material change to cost/prerequisites/duration that would affect someone's decision to apply.
 - **`potentially_relevant`** — ambiguous change, partial information, or a change to a semi-stable field (description rewording, tag adjustment).
-- **`not_relevant`** — extracted content changed but the underlying facts didn't. Page redesign, marketing copy edits, navigation changes, etc.
+- **`not_relevant`** — extracted content changed but the underlying facts did not (page redesign, marketing copy edits, navigation changes). Use only when confident.
 
-The LLM should err toward `potentially_relevant` when uncertain — `not_relevant` is only for high-confidence "nothing substantive changed."
+When uncertain, prefer **potentially_relevant**.
 
-## UI requirements
+## UI flow
 
-- **Password gate** on app entry — single shared password from `st.secrets`, blocks all functionality until entered.
-- **"Run updater" button** triggers the full pipeline; show progress as `Checking N/M...` using `st.status`.
-- **Results view** shows cards grouped by classification (`highly_relevant` first, then `potentially_relevant`, then collapsed `not_relevant` and `unchanged` summaries).
-- **Each card** has: fellowship name + URL, classification badge, diff table (old → proposed, per field), source snippet per change, and three buttons: Accept, Reject, Edit.
-- **Filter** to show only `pending` items vs. include already-reviewed.
-- **No real-time streaming** of LLM output — just final results per row.
+1. **Login** — password gate (single shared password from `st.secrets`)
+2. **"Run updater"** — triggers phase 1 (fetch all pages). Shows progress with `st.status`.
+3. **Phase 1 summary** — metrics (Changed / Unchanged / Errors / No URL), error details, estimated LLM cost.
+4. **"Analyse N entries"** — triggers phase 2 (LLM calls for changed rows only).
+5. **Results** — cards grouped by classification (highly_relevant first). Each card shows:
+   - Name + URL, classification badge, reasoning, "(forced re-check)" if triggered
+   - Type warnings (if any proposed value failed type validation)
+   - Diff table (field / current / proposed / source snippet)
+   - Accept / Reject / Edit-then-accept buttons
+6. **"Run updater again"** — resets all phase state for a fresh run.
+7. Unchanged rows shown in collapsed expander. No-URL and fetch-error rows similarly collapsed.
 
 ## Local development workflow
 
-1. `conda activate ais-tree`
-2. `streamlit run app.py` — opens `localhost:8501`, auto-reloads on file save.
-3. Local secrets in `.streamlit/secrets.toml` (gitignored). Same format as Cloud secrets.
-4. Test against the real sheet — there is no staging sheet. Acceptance writes are gated behind the human Accept button, so this is safe as long as that gate is respected.
+```bash
+conda run -n ais-tree streamlit run app.py --server.port 8501 --server.headless true
+```
+
+Opens `localhost:8501`. Auto-reloads on file save. Test against the real sheet — there is no staging sheet. Acceptance writes are gated behind the human Accept button.
 
 ## Deployment
 
 - Streamlit Community Cloud, deploying from `main` branch of the public GitHub repo.
 - Secrets (in Streamlit Cloud dashboard, TOML format — same content as local `.streamlit/secrets.toml`):
-  - `[gcp_service_account]` — the full service account JSON converted to TOML. `private_key` must preserve `\n` as literal `\n` in the TOML string.
-  - `ANTHROPIC_API_KEY`
-  - `SHEET_ID`
-  - `APP_PASSWORD`
-- `requirements.txt` must list: `streamlit`, `gspread`, `trafilatura`, `anthropic`, `requests`.
+  - `[gcp_service_account]` — full service account JSON as TOML. `private_key` must preserve `\n` as literal `\n`.
+  - `ANTHROPIC_API_KEY`, `SHEET_ID`, `APP_PASSWORD` — must appear **before** `[gcp_service_account]` in the TOML file (TOML absorbs everything after a section header into that section).
+- `requirements.txt`: streamlit, gspread, google-auth, trafilatura, anthropic, requests.
 - Push to `main` triggers auto-redeploy in ~60 seconds.
 
 ## Non-negotiables
@@ -207,36 +240,46 @@ The LLM should err toward `potentially_relevant` when uncertain — `not_relevan
 
 ## Known extraction problems
 
+### BlueDot (bluedot.org) — aisdb_001, aisdb_002, aisdb_003
+
+Deadline and cohort-start dates are visible on the page but **not extracted by trafilatura** — they are embedded in a Next.js JSON payload (`__NEXT_DATA__`) and rendered client-side. Trafilatura sees the label "Schedule" but not the dates. A fix would parse `__NEXT_DATA__` directly from the raw HTML. Not implemented in v1 — BlueDot deadlines must be checked manually. The `notes_for_claude_during_update` column for these rows warns the LLM.
+
 ### ARENA (aisdb_008)
-ARENA moved from `bluedot.org/arena` (404) to `bluedot.org/courses/arena`. URL corrected in sheet. Also has its own standalone site at `arena.education` — either URL works, the BlueDot one is preferred for consistency with the other BlueDot entries. Note: ARENA also has JS-rendered content like the other BlueDot courses (same Next.js stack), so the same `__NEXT_DATA__` extraction caveat applies for deadlines.
+
+Moved from `bluedot.org/arena` (404) to `bluedot.org/courses/arena`. URL corrected. Same Next.js extraction caveat as other BlueDot entries.
 
 ### OpenAI Residency (aisdb_018)
-Produced a fetch_error in the first live test run. The URL (`openai.com/residency/`) returns 200 and trafilatura extracts content correctly in isolation — likely a transient network or rate-limit issue. If fetch errors persist, the page may be behind a bot-detection layer and would need a Playwright fallback (out of scope for v1).
 
-### BlueDot (bluedot.org)
+Produced a `fetch_error` in the first live test. URL returns 200 in isolation — likely a transient rate-limit or bot-detection issue. If persistent, needs Playwright fallback (out of scope for v1).
 
-Deadline and cohort start dates are visible on the page but are **not extracted by trafilatura**. The dates are embedded in a Next.js JSON payload (`__NEXT_DATA__`) and rendered client-side — trafilatura only sees the static HTML, which contains the label "Schedule" but not the actual dates.
+### Frontier AI Governance (aisdb_003) — PENDING SPLIT
 
-The data is available in the raw HTML: the `soonestDeadline` field appears in a `<script id="__NEXT_DATA__">` JSON blob, and "Apply by DD Mon" appears in button text. A workaround is to parse `__NEXT_DATA__` directly from the raw response rather than relying on trafilatura's extraction. This is not implemented in v1 — for now, BlueDot deadlines must be checked and updated manually.
+BlueDot's Frontier AI Governance page covers two programs: a 5-day intensive and a 5-week part-time track. `scripts/split_aisdb003.py` is written and ready to run — it will rename aisdb_003 to the intensive track and append aisdb_003b for part-time. **Has not been run yet.** After running, both rows need manual field updates (name, duration, time_commitment, format, pacing, URL if different, deadlines).
 
-Affects: `aisdb_001`, `aisdb_002`, `aisdb_003` (all bluedot.org/courses/* URLs).
+## Backlog
 
-## Open questions to resolve in implementation
+### Audit log tab
+`config.json` has `audit_log_enabled: true` but logging to a `_audit` sheet tab is not yet implemented. Useful for debugging the first few weeks of live use.
 
-- Whether to add a "needs follow-up" state distinct from rejected (cases where the LLM correctly detected a change but the proposed values are wrong).
-- How aggressively to normalize date formats — "Dec 15, 2025" vs "2025-12-15" should be considered equal. Implement explicit normalizer in `diff.py`.
-- Whether to log every LLM response (full request + response) to a `_audit` tab for debugging early on. Default: yes for the first few weeks, behind a config flag.
+### "Needs follow-up" state
+Currently only Accept / Reject. A third state (e.g. "flag for manual check") would help when the LLM detects a real change but the proposed values are wrong.
 
-## Known issues / backlog
+### Playwright fallback for JS-heavy pages
+`requests` + trafilatura misses JS-rendered content. BlueDot deadlines are the main known case. Playwright would solve this but is out of scope for v1.
 
-### 1. Current date missing from LLM prompt
-The LLM has no awareness of today's date, so it cannot correctly infer whether an application deadline is in the past or future. E.g. Pivotal had a deadline of 3 May — the LLM proposed `application_status: open` even though it had already passed. Fix: inject `today: YYYY-MM-DD` into the user prompt so the LLM can reason about open/closed correctly.
+### cost field
+Only one entry currently has a value (`0`). The field type is still free-text `string`. Consider making it `usd_int` like `recompensation` once more data is present.
 
-### 2. `recompensation` field should be numeric (USD)
-The field currently accepts free text but should store a single number in USD (e.g. `8400` for $8,400/month, `0` for none). Complex recompensation structures (lotteries, variable stipends, housing credits) should be summarised as the minimum guaranteed value in `recompensation` and the full detail noted in `notes`. Conversion from other currencies should happen at write time. A broader task: define expected types for all fields in `config.json` and add a validation pass in `diff.py` or `pipeline.py` that warns when a proposed value doesn't match the expected type.
+## ⬅ Next step (start here next session)
 
-### 3. Frontier AI Governance has two separate programs
-`aisdb_003` (BlueDot Frontier AI Governance) covers both an intensive 5-day track and a part-time 5-week track. These should probably be two separate sheet entries. Needs a manual data decision before implementation.
+**Launch locally and test the new features:**
 
-### 4. Two-phase run: diff first, then confirm before LLM
-Currently "Run updater" fetches all pages, runs diffs, and calls the LLM in one pass. Better UX: split into two steps. Phase 1 (cheap): fetch all pages, compute hashes, identify which entries changed — show a summary table (N changed, N unchanged, N errors) and an estimated token cost (assume ~3¢ per changed entry as a rough guide). Phase 2 (expensive): user confirms, then LLM calls are made only for changed entries. This avoids surprise API costs and lets the user abort if something looks wrong.
+```bash
+conda run -n ais-tree streamlit run app.py --server.port 8501 --server.headless true
+```
+
+Things to verify:
+1. **Two-phase UX** — "Run updater" shows fetch summary before any LLM calls; cost estimate shown; "Analyse N entries" button triggers phase 2.
+2. **Triggered rows** — 19 rows are flagged `trigger_check_next_update = true` from the numeric field migration. They should appear in the "changed" count even if page content hasn't changed, and show "_(forced re-check)_" in their cards. After accepting/rejecting, re-run and confirm they no longer appear.
+3. **Type warnings** — if the LLM proposes a bad value (e.g. "10 weeks" instead of "10" for duration), a yellow warning should appear above the diff table.
+4. **Run `scripts/split_aisdb003.py`** to split Frontier AI Governance into two rows, then manually update field values.

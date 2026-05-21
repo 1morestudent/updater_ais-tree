@@ -18,6 +18,7 @@ STATE_COLUMNS = [
     "last_checked_at",
     "last_classification",
     "last_result",
+    "trigger_check_next_update",
 ]
 
 
@@ -42,7 +43,14 @@ def ensure_state_tab(spreadsheet: gspread.Spreadsheet) -> gspread.Worksheet:
         ws = spreadsheet.add_worksheet(title=STATE_TAB, rows=500, cols=len(STATE_COLUMNS))
         ws.append_row(STATE_COLUMNS)
         return ws
-    return spreadsheet.worksheet(STATE_TAB)
+    ws = spreadsheet.worksheet(STATE_TAB)
+    # Backfill any columns added after initial creation
+    existing = ws.row_values(1)
+    for col_name in STATE_COLUMNS:
+        if col_name not in existing:
+            ws.update_cell(1, len(existing) + 1, col_name)
+            existing.append(col_name)
+    return ws
 
 
 def read_state(state_ws: gspread.Worksheet) -> dict[str, dict]:
@@ -102,6 +110,22 @@ def set_last_verified_by_id(spreadsheet: gspread.Spreadsheet, fellowship_id: str
     if "last_verified" in headers:
         col = headers.index("last_verified") + 1
         ws.update_cell(sheet_row, col, date.today().isoformat())
+
+
+def set_trigger_flag(state_ws: gspread.Worksheet, fellowship_id: str, value: str) -> None:
+    """Set trigger_check_next_update for a row in the state tab."""
+    all_values = state_ws.get_all_values()
+    if not all_values:
+        return
+    headers = all_values[0]
+    if "trigger_check_next_update" not in headers or "id" not in headers:
+        return
+    id_col = headers.index("id")
+    trigger_col = headers.index("trigger_check_next_update") + 1
+    for i, row in enumerate(all_values[1:], start=2):
+        if row[id_col] == fellowship_id:
+            state_ws.update_cell(i, trigger_col, value)
+            return
 
 
 def update_state_result(state_ws: gspread.Worksheet, fellowship_id: str, last_result: str) -> None:

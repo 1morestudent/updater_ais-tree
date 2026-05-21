@@ -19,7 +19,8 @@ When uncertain, prefer **potentially_relevant** over **not_relevant**.
 - Never propose values you are guessing — if the page doesn't mention it, leave it out.
 - For date fields (next_deadline, next_cohort_start): use YYYY-MM-DD format. If a month and day are given without a year, infer the most plausible upcoming year. Use [unclear] if genuinely not stated.
 - For binary fields (for_student, for_early_career, etc.): use 0 or 1 only.
-- For application_status: use one of "open", "closed", "rolling", or [unclear].
+- For application_status: use one of "open", "closed", "rolling", or [unclear]. Use "Today's date" to determine whether a deadline is in the past — if next_deadline is past and no future deadline is stated, set application_status to "closed" unless the page explicitly says otherwise.
+- For recompensation: always propose a plain integer representing USD (e.g. 8400 for $8,400/month, 0 for none). No currency symbols, no commas, no text. For complex structures (variable stipends, housing credits, lottery-based), use the minimum guaranteed value as the integer and leave detail to the notes field.
 - Filling in a field that currently says [unclear] counts as a meaningful change — include it.
 - Never propose changes to: ID, url, last_verified, notes, notes_for_claude_during_update.
 
