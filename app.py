@@ -8,13 +8,13 @@ from updater.llm import build_schema_description, load_system_prompt
 from updater.pipeline import fetch_row, process_changed_row, _make_no_llm_result
 from updater.sheets import (
     accept_fellowship,
+    batch_set_last_verified,
     ensure_proposals_tab,
     ensure_state_tab,
     open_sheet,
     read_main_rows,
     read_pending_proposals,
     read_state,
-    set_last_verified_by_id,
     supersede_pending_proposals,
     update_proposal_status,
     update_state_result,
@@ -252,6 +252,7 @@ if st.session_state.run_phase is None:
         state = read_state(state_ws)
 
         phase1_results = []
+        verified_ids = []
         with st.status("Fetching fellowship pages…", expanded=True) as run_status:
             for i, row in enumerate(rows):
                 name = row.get("name", row["ID"])
@@ -270,8 +271,9 @@ if st.session_state.run_phase is None:
                         "last_result": "",
                     }
                     upsert_state_row(state_ws, state, new_state_row)
-                    set_last_verified_by_id(spreadsheet, row["ID"])
+                    verified_ids.append(row["ID"])
 
+            batch_set_last_verified(spreadsheet, verified_ids)
             changed_count = sum(1 for r in phase1_results if r["status"] == "changed")
             run_status.update(
                 label=f"Fetch complete — {changed_count} changed, {len(phase1_results) - changed_count} other",
@@ -328,6 +330,7 @@ elif st.session_state.run_phase == "phase1_done":
                 phase1_rows = st.session_state.phase1_rows
 
                 results = []
+                verified_ids = []
                 with st.status("Analysing changed entries…", expanded=True) as run_status:
                     for i, fr in enumerate(changed):
                         row = phase1_rows[fr["id"]]
@@ -346,9 +349,10 @@ elif st.session_state.run_phase == "phase1_done":
                             "trigger_check_next_update": "",  # clear trigger after LLM run
                         }
                         upsert_state_row(state_ws, state, new_state_row)
-                        set_last_verified_by_id(spreadsheet, fr["id"])
+                        verified_ids.append(fr["id"])
                         write_proposal_rows(proposals_ws, result)
 
+                    batch_set_last_verified(spreadsheet, verified_ids)
                     run_status.update(
                         label=f"Done — {len(changed)} entries analysed",
                         state="complete",

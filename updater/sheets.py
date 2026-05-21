@@ -62,23 +62,29 @@ def ensure_state_tab(spreadsheet: gspread.Spreadsheet) -> gspread.Worksheet:
 
 
 def read_state(state_ws: gspread.Worksheet) -> dict[str, dict]:
-    rows = state_ws.get_all_records(default_blank="")
-    return {row["id"]: row for row in rows}
+    """Read state tab and embed _row_num in each row dict to avoid re-reads later."""
+    all_rows = state_ws.get_all_values()
+    if not all_rows:
+        return {}
+    headers = all_rows[0]
+    state = {}
+    for i, row in enumerate(all_rows[1:], start=2):
+        row_dict = {h: (row[j] if j < len(row) else "") for j, h in enumerate(headers)}
+        fid = row_dict.get("id", "")
+        if fid:
+            row_dict["_row_num"] = i
+            state[fid] = row_dict
+    return state
 
 
 def upsert_state_row(state_ws: gspread.Worksheet, state: dict[str, dict], row: dict[str, Any]) -> None:
     fellowship_id = row["id"]
-    all_rows = state_ws.get_all_values()
-    headers = all_rows[0] if all_rows else STATE_COLUMNS
-    values = [str(row.get(col, "")) for col in headers]
-
-    if fellowship_id in state:
-        # find the row index (1-based, +1 for header)
-        row_indices = [i + 2 for i, r in enumerate(all_rows[1:]) if r and r[0] == fellowship_id]
-        if row_indices:
-            state_ws.update(f"A{row_indices[0]}", [values])
-            return
-    state_ws.append_row(values)
+    values = [str(row.get(col, "")) for col in STATE_COLUMNS]
+    existing = state.get(fellowship_id)
+    if existing and "_row_num" in existing:
+        state_ws.update(f"A{existing['_row_num']}", [values])
+    else:
+        state_ws.append_row(values)
 
 
 def find_sheet_row(spreadsheet: gspread.Spreadsheet, fellowship_id: str) -> int | None:
@@ -109,15 +115,29 @@ def accept_fellowship(spreadsheet: gspread.Spreadsheet, fellowship_id: str, upda
     return True
 
 
-def set_last_verified_by_id(spreadsheet: gspread.Spreadsheet, fellowship_id: str) -> None:
-    sheet_row = find_sheet_row(spreadsheet, fellowship_id)
-    if sheet_row is None:
+def batch_set_last_verified(spreadsheet: gspread.Spreadsheet, fellowship_ids: list[str]) -> None:
+    """Update last_verified for multiple rows in one batch write."""
+    if not fellowship_ids:
         return
     ws = spreadsheet.sheet1
-    headers = ws.row_values(1)
-    if "last_verified" in headers:
-        col = headers.index("last_verified") + 1
-        ws.update_cell(sheet_row, col, date.today().isoformat())
+    all_values = ws.get_all_values()
+    if not all_values:
+        return
+    headers = all_values[0]
+    if "last_verified" not in headers or "ID" not in headers:
+        return
+    id_col = headers.index("ID")
+    lv_col = headers.index("last_verified")
+    lv_col_letter = chr(ord('A') + lv_col)
+    today = date.today().isoformat()
+    id_set = set(fellowship_ids)
+    updates = [
+        {"range": f"{lv_col_letter}{i}", "values": [[today]]}
+        for i, row in enumerate(all_values[1:], start=2)
+        if len(row) > id_col and row[id_col] in id_set
+    ]
+    if updates:
+        ws.batch_update(updates)
 
 
 def set_trigger_flag(state_ws: gspread.Worksheet, fellowship_id: str, value: str) -> None:
