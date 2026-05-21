@@ -300,6 +300,12 @@ Only one entry currently has a value (`0`). The field type is still free-text `s
 ### Audit log tab
 `config.json` has `audit_log_enabled: true` but a dedicated `_audit` tab is not yet implemented. The `_proposals` tab already records all LLM proposals and their outcomes (accepted/rejected/superseded), which covers the most useful audit data. A separate `_audit` tab would add coverage for manual edits made outside the updater.
 
+## Wrap-up checklist
+
+When the user says to wrap up, before ending the session:
+1. Check if CLAUDE.md, napkin.md, or README.md need updating to reflect changes made this session (new files, changed behaviour, resolved backlog items, new known issues).
+2. Commit and push all outstanding changes to git, including the documentation updates.
+
 ## ⬅ Next step (start here next session)
 
 The app is working end-to-end.
