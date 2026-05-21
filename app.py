@@ -1,20 +1,26 @@
 import json
 
 import anthropic
+import pandas as pd
 import streamlit as st
 
 from updater.llm import build_schema_description, load_system_prompt
 from updater.pipeline import fetch_row, process_changed_row, _make_no_llm_result
 from updater.sheets import (
     accept_fellowship,
+    ensure_proposals_tab,
     ensure_state_tab,
     open_sheet,
     read_main_rows,
+    read_pending_proposals,
     read_state,
     set_last_verified_by_id,
+    supersede_pending_proposals,
+    update_proposal_status,
     update_state_result,
     upsert_state_row,
     set_trigger_flag,
+    write_proposal_rows,
 )
 
 st.set_page_config(page_title="AIS-tree Updater", layout="wide")
@@ -103,15 +109,19 @@ def _do_accept(result: dict, edits: dict | None = None) -> None:
     updates = {c["field"]: (edits or {}).get(c["field"], c["proposed"]) for c in result["changes"]}
     spreadsheet = get_spreadsheet()
     state_ws = ensure_state_tab(spreadsheet)
+    proposals_ws = ensure_proposals_tab(spreadsheet)
     accept_fellowship(spreadsheet, result["id"], updates)
     update_state_result(state_ws, result["id"], "accepted")
+    update_proposal_status(proposals_ws, result["id"], "accepted")
     st.session_state.review[result["id"]] = {"action": "accepted"}
 
 
 def _do_reject(result: dict) -> None:
     spreadsheet = get_spreadsheet()
     state_ws = ensure_state_tab(spreadsheet)
+    proposals_ws = ensure_proposals_tab(spreadsheet)
     update_state_result(state_ws, result["id"], "rejected")
+    update_proposal_status(proposals_ws, result["id"], "rejected")
     st.session_state.review[result["id"]] = {"action": "rejected"}
 
 
@@ -151,16 +161,15 @@ def _render_card(result: dict) -> None:
             for tw in result.get("type_warnings", []):
                 st.warning(f"Type warning — **{tw['field']}**: {tw['warning']}")
 
-            table_data = [
-                {
-                    "Field": c["field"],
+            table_data = {
+                c["field"]: {
                     "Current": c["old"],
                     "Proposed": c["proposed"],
-                    "Source snippet": result["snippets"].get(c["field"], "")[:120],
+                    "Source snippet": result["snippets"].get(c["field"], ""),
                 }
                 for c in result["changes"]
-            ]
-            st.dataframe(table_data, use_container_width=True, hide_index=True)
+            }
+            st.table(pd.DataFrame(table_data).T)
 
             col1, col2, col3 = st.columns(3)
             with col1:
@@ -182,7 +191,7 @@ def _render_card(result: dict) -> None:
                 for c in result["changes"]:
                     snippet = result["snippets"].get(c["field"], "")
                     if snippet:
-                        st.caption(f"Source: {snippet[:120]}")
+                        st.caption(f"Source: {snippet}")
                     edits[c["field"]] = st.text_input(
                         f"{c['field']} (current: {c['old']})",
                         value=c["proposed"],
@@ -210,10 +219,34 @@ def _render_card(result: dict) -> None:
 
 st.title("AIS-tree Updater")
 
-# ── Phase 0: idle — show "Run updater" button ──────────────────────────────
+# ── Phase 0: idle — resume check + "Run updater" button ───────────────────
 if st.session_state.run_phase is None:
-    if st.button("Run updater", type="primary"):
-        spreadsheet = get_spreadsheet()
+    spreadsheet = get_spreadsheet()
+    proposals_ws = ensure_proposals_tab(spreadsheet)
+    pending_results = read_pending_proposals(proposals_ws)
+
+    if pending_results:
+        n = len(pending_results)
+        st.info(
+            f"**{n} fellowship{'s' if n != 1 else ''}** with pending proposed changes from the last run."
+        )
+        col_resume, col_run = st.columns(2)
+        with col_resume:
+            resume_clicked = st.button(f"Resume pending review ({n})", type="primary")
+        with col_run:
+            run_clicked = st.button("Run updater (start fresh)")
+    else:
+        resume_clicked = False
+        run_clicked = st.button("Run updater", type="primary")
+
+    if resume_clicked:
+        st.session_state.results = pending_results
+        st.session_state.review = {}
+        st.session_state.run_phase = "complete"
+        st.rerun()
+
+    if run_clicked:
+        supersede_pending_proposals(proposals_ws)
         rows = read_main_rows(spreadsheet)
         state_ws = ensure_state_tab(spreadsheet)
         state = read_state(state_ws)
@@ -287,6 +320,7 @@ elif st.session_state.run_phase == "phase1_done":
             if st.button(f"Analyse {len(changed)} {'entry' if len(changed) == 1 else 'entries'}", type="primary"):
                 spreadsheet = get_spreadsheet()
                 state_ws = ensure_state_tab(spreadsheet)
+                proposals_ws = ensure_proposals_tab(spreadsheet)
                 system_prompt = load_system_prompt()
                 schema_desc = build_schema_description(config["fields"])
                 llm_client = get_llm_client()
@@ -313,6 +347,7 @@ elif st.session_state.run_phase == "phase1_done":
                         }
                         upsert_state_row(state_ws, state, new_state_row)
                         set_last_verified_by_id(spreadsheet, fr["id"])
+                        write_proposal_rows(proposals_ws, result)
 
                     run_status.update(
                         label=f"Done — {len(changed)} entries analysed",
