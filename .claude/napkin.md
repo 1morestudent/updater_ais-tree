@@ -13,12 +13,13 @@ App password: in `.streamlit/secrets.toml` → `APP_PASSWORD`
 - Batch `last_verified` writes with `batch_set_last_verified()` after the loop
 - Use `batch_update()` for multi-cell writes in `_proposals` and `_updater_state`
 
-## Three internal sheet tabs
+## Sheet tabs
 | Tab | Purpose |
 |---|---|
 | sheet1 | Main fellowship data — feeds live public CSV. Writes go live in 5–10 min. |
 | `_updater_state` | Hash + classification per row. `trigger_check_next_update="true"` forces LLM re-check. |
 | `_proposals` | One row per proposed field change. `status`: pending/accepted/rejected/superseded. Resume source. |
+| `_schema` | Human-readable field docs. Managed by `scripts/create_schema_tab.py`, not the pipeline. |
 
 ## Adding new fellowships
 Add a row to sheet1 with a unique `ID` and `url`. Next run picks it up automatically (no prior hash → treated as changed → goes through LLM). Duplicate-ID check runs at startup.
@@ -32,5 +33,5 @@ Uses `st.table(pd.DataFrame(table_data).T)` — wraps text naturally. Do NOT use
 - Never touch system Python — conda env `ais-tree` only
 - No `sudo` — print needed commands and wait
 
-## Pending data task
-Run `scripts/split_aisdb003.py` to split aisdb_003 (Frontier AI Governance) into two rows. Not yet run. Update field values manually after.
+## Description tone
+The LLM prompt instructs the model to write `description` neutrally. Promotional/subjective claims must be attributed to the program (e.g. "described by the program as ideal for newcomers"), not stated as fact.

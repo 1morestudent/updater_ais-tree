@@ -75,7 +75,8 @@ ais-tree-updater/
 ├── prompts/
 │   └── classify.md         # system prompt for the classification call
 ├── scripts/
-│   └── migrate_numeric_fields.py  # one-time: converted duration/time_commitment to numeric
+│   ├── create_schema_tab.py        # re-runnable: writes _schema documentation tab to the sheet
+│   └── migrate_numeric_fields.py   # one-time: converted duration/time_commitment to numeric
 ├── config.json             # schema, field metadata, fetch settings, model name
 ├── requirements.txt
 ├── .streamlit/
@@ -157,6 +158,9 @@ Auto-created on first run if missing. One row per proposed field change, written
 
 On a new run, all `pending` rows are marked `superseded` before new proposals are written (history preserved, resume stays clean).
 
+### `_schema`
+Human-readable field documentation. Three columns: `field name`, `description`, `expected value / format`. Created and updated by `scripts/create_schema_tab.py` — not auto-managed by the updater pipeline.
+
 ## Pipeline
 
 The pipeline is split into two phases, both visible in the UI before any LLM costs are incurred.
@@ -195,6 +199,7 @@ The pipeline is split into two phases, both visible in the UI before any LLM cos
 
 - On JSON parse failure: mark `llm_error`, store raw output, surface in UI — do not crash.
 - Prompt cache (`cache_control: ephemeral` on system block) gives within-run savings across multiple rows. Zero benefit across separate runs.
+- **Description tone rule (in prompt):** The LLM is instructed to write `description` as a neutral outside observer. Promotional or subjective claims from the program must be attributed (e.g. "described by the program as ideal for newcomers") rather than stated as fact.
 
 ## Type validation system
 
