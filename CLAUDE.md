@@ -75,7 +75,6 @@ ais-tree-updater/
 ├── prompts/
 │   └── classify.md         # system prompt for the classification call
 ├── scripts/
-│   ├── split_aisdb003.py   # one-time: split Frontier AI Governance into two rows
 │   └── migrate_numeric_fields.py  # one-time: converted duration/time_commitment to numeric
 ├── config.json             # schema, field metadata, fetch settings, model name
 ├── requirements.txt
@@ -282,14 +281,7 @@ Moved from `bluedot.org/arena` (404) to `bluedot.org/courses/arena`. URL correct
 
 Produced a `fetch_error` in early testing. URL returns 200 in isolation — likely a transient rate-limit or bot-detection issue. If persistent, needs Playwright fallback (out of scope for v1).
 
-### Frontier AI Governance (aisdb_003) — PENDING SPLIT
-
-BlueDot's Frontier AI Governance page covers two programs: a 5-day intensive and a 5-week part-time track. `scripts/split_aisdb003.py` is written and ready to run — it will rename aisdb_003 to the intensive track and append aisdb_003b for part-time. **Has not been run yet.** After running, both rows need manual field updates (name, duration, time_commitment, format, pacing, URL if different, deadlines).
-
 ## Backlog
-
-### Run `scripts/split_aisdb003.py`
-Splits aisdb_003 (Frontier AI Governance) into two rows. After running, update field values manually for both rows. Script is idempotent-safe to inspect but should only be run once.
 
 ### "Needs follow-up" state
 Currently only Accept / Reject. A third state (e.g. "flag for manual check") would help when the LLM detects a real change but the proposed values are wrong.
@@ -305,9 +297,7 @@ Only one entry currently has a value (`0`). The field type is still free-text `s
 
 ## ⬅ Next step (start here next session)
 
-The app is working end-to-end. The main outstanding data task is:
-
-**Run `scripts/split_aisdb003.py`** to split aisdb_003 (Frontier AI Governance) into the 5-day intensive and 5-week part-time tracks, then manually update field values for both rows (name, duration, time_commitment, format, pacing, URL if different, deadlines).
+The app is working end-to-end.
 
 To start the local server (conda not on PATH in non-login shells):
 ```bash
