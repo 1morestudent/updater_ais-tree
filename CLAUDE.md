@@ -27,20 +27,27 @@ pip install <package>
 ```bash
 conda create -n ais-tree python=3.11
 conda activate ais-tree
-conda install -c conda-forge gspread streamlit trafilatura anthropic requests
+conda install -c conda-forge gspread streamlit trafilatura anthropic requests pandas
 ```
 
 **Do not touch system Python.** Everything runs inside the conda env.
+
+**`conda` is not on PATH in non-login shells.** When starting the server from Claude Code, use the full binary path:
+
+```bash
+/home/claude_usr/miniconda3/envs/ais-tree/bin/streamlit run app.py --server.port 8501 --server.headless true
+```
 
 ## Architecture decisions
 
 - **Streamlit Community Cloud** for hosting. Free tier; requires public GitHub repo.
 - **Google Sheet is the source of truth**, accessed via gspread + service account.
-- **All state lives in the same sheet** in a `_updater_state` tab. Streamlit Cloud's filesystem is ephemeral, so we cannot persist anything in local files between runs.
+- **All state lives in the same sheet** across three internal tabs. Streamlit Cloud's filesystem is ephemeral, so we cannot persist anything in local files between runs.
 - **Hash-based change detection is code-only.** The LLM is never asked "did this page change?" — that's a deterministic comparison of trafilatura-extracted content hashes against the stored hash in `_updater_state`.
 - **LLM is used only for two things:** (1) proposing new field values from changed page content, (2) classifying the overall change as `highly_relevant`, `potentially_relevant`, or `not_relevant`. Per-field diffing (old value vs proposed new value) is done in code via normalized string comparison.
 - **Human acceptance is required for every write to the main sheet.** No auto-accept in v1, even for `highly_relevant`.
 - **Schema lives in `config.json` in this repo**, not derived from sheet headers. Schema changes are versioned in git and reviewable in PRs.
+- **Sheets API quota:** The free tier allows 60 read requests/minute. The pipeline is designed to use ~8–10 reads per full run regardless of row count. Do not introduce per-row read calls in loops — always batch.
 
 ## Tech stack
 
@@ -50,6 +57,7 @@ conda install -c conda-forge gspread streamlit trafilatura anthropic requests
 - `trafilatura` for main-content extraction from fetched HTML
 - `requests` for fetching (Playwright fallback noted as future work, not v1)
 - `anthropic` SDK for the LLM calls
+- `pandas` for diff table rendering (`st.table`)
 - Model: `claude-sonnet-4-6` (verify current latest Sonnet when starting; pin in `config.json`)
 
 ## File layout
@@ -60,7 +68,7 @@ ais-tree-updater/
 ├── updater/
 │   ├── __init__.py
 │   ├── fetch.py            # HTTP fetch + trafilatura extraction + hashing
-│   ├── sheets.py           # gspread wrapper, read main + state tab, writes
+│   ├── sheets.py           # gspread wrapper, read main + state + proposals tabs, writes
 │   ├── llm.py              # Anthropic API call + response parsing
 │   ├── diff.py             # field-level normalization, comparison, type validation
 │   └── pipeline.py         # fetch_row (phase 1) + process_changed_row (phase 2)
@@ -97,6 +105,8 @@ The main sheet has 27 columns. Each fellowship is one row, identified by a stabl
 - `aisdb_001–003` (BlueDot): warns that deadlines are in the `__NEXT_DATA__` Next.js JSON blob, not in trafilatura-extracted text
 - `aisdb_012` (Anthropic Fellows): warns that the URL is year-specific and a 404 means the cycle ended, not that applications are closed
 
+**Adding new rows:** Just add the row to the sheet with a unique `ID` and a `url`. The updater will pick it up automatically on the next run (no state entry → hash mismatch → goes through LLM). A duplicate-ID check runs at startup and shows an error if any IDs are repeated.
+
 ### Field types (enforced in `config.json` and validated in `diff.py`)
 
 | Type | Fields | Notes |
@@ -120,9 +130,13 @@ The main sheet has 27 columns. Each fellowship is one row, identified by a stabl
 
 Any field may hold `[unclear]` — filling it in counts as a meaningful change.
 
-## State tab (`_updater_state`)
+## Sheet tabs
 
-Auto-created on first run if missing. `ensure_state_tab()` also backfills any columns added after the initial creation (so adding a column to `STATE_COLUMNS` is safe). Columns:
+### Main tab (sheet1)
+The fellowship directory. 27 columns, one row per fellowship. This is the source of truth and feeds the live public CSV. Writes go live within 5–10 minutes.
+
+### `_updater_state`
+Auto-created on first run if missing. `ensure_state_tab()` backfills any columns added after initial creation. Columns:
 
 - `id` — matches `ID` in main sheet
 - `url` — denormalized for sanity-checking
@@ -130,9 +144,19 @@ Auto-created on first run if missing. `ensure_state_tab()` also backfills any co
 - `last_checked_at` — ISO timestamp
 - `last_classification` — `highly_relevant` / `potentially_relevant` / `not_relevant` / `unchanged` / `fetch_error`
 - `last_result` — `accepted` / `rejected` / `pending` / null
-- `trigger_check_next_update` — if `"true"`, the next run forces this row through the LLM even if the hash hasn't changed, then clears the flag. Used to re-verify rows whose current values are known approximations. Set manually or by migration scripts.
+- `trigger_check_next_update` — if `"true"`, the next run forces this row through the LLM even if the hash hasn't changed, then clears the flag. Set manually in the sheet to force re-verification of a row.
 
-**19 rows currently have `trigger_check_next_update = true`** (set during the numeric field migration — ranges were converted to max values and need LLM verification). They will auto-clear on next updater run.
+### `_proposals`
+Auto-created on first run if missing. One row per proposed field change, written during phase 2. Serves as both session persistence (resume after reload) and a human-readable audit log of what the LLM proposed and what was decided. Columns:
+
+- `run_at` — ISO timestamp of the run
+- `id`, `name`, `url` — fellowship identity
+- `classification`, `reasoning`, `triggered` — LLM output metadata
+- `field` — the field being proposed (`[none]` if hash changed but no diff found)
+- `current_value`, `proposed_value`, `source_snippet`, `type_warning` — the proposal detail
+- `status` — `pending` / `accepted` / `rejected` / `superseded`
+
+On a new run, all `pending` rows are marked `superseded` before new proposals are written (history preserved, resume stays clean).
 
 ## Pipeline
 
@@ -142,6 +166,7 @@ The pipeline is split into two phases, both visible in the UI before any LLM cos
 - If hash matches AND no trigger → `unchanged`. State updated, `last_verified` set. No LLM call.
 - If hash changed OR trigger is set → `changed`. Passes to phase 2.
 - On fetch/network error → `fetch_error`. State updated.
+- `last_verified` for all processed rows is written in a single batch call at the end of the loop.
 
 **Phase 2 — LLM (confirmed by user):** After phase 1, the UI shows a summary (N changed, N unchanged, N errors) and an estimated cost (~3¢/entry). User must click "Analyse N entries" to proceed.
 - LLM receives: today's date, current row JSON, extracted page text, schema with allowed values listed per field.
@@ -149,6 +174,7 @@ The pipeline is split into two phases, both visible in the UI before any LLM cos
 - Code-level diff compares proposed values against current values using type-aware normalization.
 - Type validation runs on all proposed values — warnings surfaced in the review card.
 - State updated with new hash, classification, `last_result = pending`. Trigger flag cleared.
+- Proposals written to `_proposals` tab (one row per field change) for persistence.
 
 **Review (per card):** Accept / Reject / Edit-then-accept. Accept writes proposed values to the main sheet. Triggered rows show "_(forced re-check)_" label.
 
@@ -191,21 +217,24 @@ When uncertain, prefer **potentially_relevant**.
 ## UI flow
 
 1. **Login** — password gate (single shared password from `st.secrets`)
-2. **"Run updater"** — triggers phase 1 (fetch all pages). Shows progress with `st.status`.
-3. **Phase 1 summary** — metrics (Changed / Unchanged / Errors / No URL), error details, estimated LLM cost.
-4. **"Analyse N entries"** — triggers phase 2 (LLM calls for changed rows only).
-5. **Results** — cards grouped by classification (highly_relevant first). Each card shows:
+2. **Idle screen** — if pending proposals exist in `_proposals`, shows "Resume pending review (N)" button alongside "Run updater (start fresh)". Otherwise shows only "Run updater".
+3. **Duplicate ID check** — runs immediately on "Run updater", before any fetch work. Shows error with the offending IDs and stops if duplicates found.
+4. **"Run updater"** — triggers phase 1 (fetch all pages). Shows progress with `st.status`.
+5. **Phase 1 summary** — metrics (Changed / Unchanged / Errors / No URL), error details, estimated LLM cost.
+6. **"Analyse N entries"** — triggers phase 2 (LLM calls for changed rows only).
+7. **Results** — cards grouped by classification (highly_relevant first). Each card shows:
    - Name + URL, classification badge, reasoning, "(forced re-check)" if triggered
    - Type warnings (if any proposed value failed type validation)
-   - Diff table (field / current / proposed / source snippet)
+   - Diff table (field / current / proposed / source snippet) — text wraps automatically
    - Accept / Reject / Edit-then-accept buttons
-6. **"Run updater again"** — resets all phase state for a fresh run.
-7. Unchanged rows shown in collapsed expander. No-URL and fetch-error rows similarly collapsed.
+8. **"Run updater again"** — resets all phase state for a fresh run.
+9. Unchanged rows shown in collapsed expander. No-URL and fetch-error rows similarly collapsed.
 
 ## Local development workflow
 
 ```bash
-conda run -n ais-tree streamlit run app.py --server.port 8501 --server.headless true
+# conda is not on PATH in non-login shells — use full path:
+/home/claude_usr/miniconda3/envs/ais-tree/bin/streamlit run app.py --server.port 8501 --server.headless true
 ```
 
 Opens `localhost:8501`. Auto-reloads on file save. Test against the real sheet — there is no staging sheet. Acceptance writes are gated behind the human Accept button.
@@ -216,7 +245,7 @@ Opens `localhost:8501`. Auto-reloads on file save. Test against the real sheet �
 - Secrets (in Streamlit Cloud dashboard, TOML format — same content as local `.streamlit/secrets.toml`):
   - `[gcp_service_account]` — full service account JSON as TOML. `private_key` must preserve `\n` as literal `\n`.
   - `ANTHROPIC_API_KEY`, `SHEET_ID`, `APP_PASSWORD` — must appear **before** `[gcp_service_account]` in the TOML file (TOML absorbs everything after a section header into that section).
-- `requirements.txt`: streamlit, gspread, google-auth, trafilatura, anthropic, requests.
+- `requirements.txt`: streamlit, gspread, google-auth, trafilatura, anthropic, requests, pandas.
 - Push to `main` triggers auto-redeploy in ~60 seconds.
 
 ## Non-negotiables
@@ -225,8 +254,9 @@ Opens `localhost:8501`. Auto-reloads on file save. Test against the real sheet �
 - **Never commit credentials.** `service_account.json`, `.streamlit/secrets.toml` in `.gitignore`. Verify before every commit.
 - **Never modify the main sheet's structure** (column add/remove/rename) from this tool. Schema changes are manual + a `config.json` update.
 - **The published-to-web CSV that feeds the live website reads from the main data tab.** Writes go live within 5–10 minutes. Treat writes as production changes.
-- **`_updater_state` tab is internal.** Don't expose it in the live website's CSV.
+- **`_updater_state` and `_proposals` tabs are internal.** Don't expose them in the live website's CSV.
 - **No `sudo`.** Report needed system packages to the human and stop.
+- **No per-row Sheets API reads in loops.** The quota is 60 reads/minute. Read once, cache, batch writes.
 
 ## Out of scope for v1
 
@@ -250,7 +280,7 @@ Moved from `bluedot.org/arena` (404) to `bluedot.org/courses/arena`. URL correct
 
 ### OpenAI Residency (aisdb_018)
 
-Produced a `fetch_error` in the first live test. URL returns 200 in isolation — likely a transient rate-limit or bot-detection issue. If persistent, needs Playwright fallback (out of scope for v1).
+Produced a `fetch_error` in early testing. URL returns 200 in isolation — likely a transient rate-limit or bot-detection issue. If persistent, needs Playwright fallback (out of scope for v1).
 
 ### Frontier AI Governance (aisdb_003) — PENDING SPLIT
 
@@ -258,8 +288,8 @@ BlueDot's Frontier AI Governance page covers two programs: a 5-day intensive and
 
 ## Backlog
 
-### Audit log tab
-`config.json` has `audit_log_enabled: true` but logging to a `_audit` sheet tab is not yet implemented. Useful for debugging the first few weeks of live use.
+### Run `scripts/split_aisdb003.py`
+Splits aisdb_003 (Frontier AI Governance) into two rows. After running, update field values manually for both rows. Script is idempotent-safe to inspect but should only be run once.
 
 ### "Needs follow-up" state
 Currently only Accept / Reject. A third state (e.g. "flag for manual check") would help when the LLM detects a real change but the proposed values are wrong.
@@ -270,16 +300,16 @@ Currently only Accept / Reject. A third state (e.g. "flag for manual check") wou
 ### cost field
 Only one entry currently has a value (`0`). The field type is still free-text `string`. Consider making it `usd_int` like `recompensation` once more data is present.
 
+### Audit log tab
+`config.json` has `audit_log_enabled: true` but a dedicated `_audit` tab is not yet implemented. The `_proposals` tab already records all LLM proposals and their outcomes (accepted/rejected/superseded), which covers the most useful audit data. A separate `_audit` tab would add coverage for manual edits made outside the updater.
+
 ## ⬅ Next step (start here next session)
 
-**Launch locally and test the new features:**
+The app is working end-to-end. The main outstanding data task is:
 
+**Run `scripts/split_aisdb003.py`** to split aisdb_003 (Frontier AI Governance) into the 5-day intensive and 5-week part-time tracks, then manually update field values for both rows (name, duration, time_commitment, format, pacing, URL if different, deadlines).
+
+To start the local server (conda not on PATH in non-login shells):
 ```bash
-conda run -n ais-tree streamlit run app.py --server.port 8501 --server.headless true
+/home/claude_usr/miniconda3/envs/ais-tree/bin/streamlit run app.py --server.port 8501 --server.headless true
 ```
-
-Things to verify:
-1. **Two-phase UX** — "Run updater" shows fetch summary before any LLM calls; cost estimate shown; "Analyse N entries" button triggers phase 2.
-2. **Triggered rows** — 19 rows are flagged `trigger_check_next_update = true` from the numeric field migration. They should appear in the "changed" count even if page content hasn't changed, and show "_(forced re-check)_" in their cards. After accepting/rejecting, re-run and confirm they no longer appear.
-3. **Type warnings** — if the LLM proposes a bad value (e.g. "10 weeks" instead of "10" for duration), a yellow warning should appear above the diff table.
-4. **Run `scripts/split_aisdb003.py`** to split Frontier AI Governance into two rows, then manually update field values.

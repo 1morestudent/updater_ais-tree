@@ -1,4 +1,5 @@
 import json
+from collections import Counter
 
 import anthropic
 import pandas as pd
@@ -248,6 +249,13 @@ if st.session_state.run_phase is None:
     if run_clicked:
         supersede_pending_proposals(proposals_ws)
         rows = read_main_rows(spreadsheet)
+
+        id_counts = Counter(row.get("ID", "") for row in rows)
+        duplicates = sorted(id_ for id_, n in id_counts.items() if id_ and n > 1)
+        if duplicates:
+            st.error(f"Duplicate IDs in sheet — fix before running: **{', '.join(duplicates)}**")
+            st.stop()
+
         state_ws = ensure_state_tab(spreadsheet)
         state = read_state(state_ws)
 
