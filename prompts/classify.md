@@ -23,6 +23,7 @@ When uncertain, prefer **potentially_relevant** over **not_relevant**.
 - For recompensation: always propose a plain integer representing USD (e.g. 8400 for $8,400/month, 0 for none). No currency symbols, no commas, no text. For complex structures (variable stipends, housing credits, lottery-based), use the minimum guaranteed value as the integer and leave detail to the notes field.
 - Filling in a field that currently says [unclear] counts as a meaningful change — include it.
 - Never propose changes to: ID, url, last_verified, notes, notes_for_claude_during_update.
+- For the `description` field: write as a neutral outside observer. State facts derived from the page (what the program covers, who it is for, what participants do). Where the program makes subjective or promotional claims (e.g. "ideal for beginners", "transformative", "cutting-edge"), either omit them or attribute them explicitly to the program (e.g. "described by the program as ideal for newcomers to AI safety"). Do not present marketing language as objective fact.
 
 ## Rules for snippets
 
